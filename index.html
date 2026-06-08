@@ -144,6 +144,24 @@ function App() {
     reader.readAsText(file);
     e.target.value = "";
   };
+  const applyBackup = (d) => {
+    if (Array.isArray(d.purchases)) setPurchases(d.purchases);
+    if (Array.isArray(d.bigBuys)) setBigBuys(d.bigBuys);
+    if (d.assume) setAssume((s) => ({ ...s, ...d.assume }));
+    if (d.plan) setPlan((s) => ({ ...s, ...d.plan }));
+    setSavedAt(Date.now());
+  };
+  const copyBackup = async () => {
+    const text = JSON.stringify({ app: "btc-dca-tracker", version: 1, exportedAt: new Date().toISOString(), purchases, bigBuys, assume, plan });
+    try { await navigator.clipboard.writeText(text); alert("✓ Respaldo copiado. Pégalo en una nota o mensaje para ti mismo (o en el otro dispositivo, usa 'Pegar respaldo')."); }
+    catch (e) { window.prompt("Copia este texto y guárdalo como respaldo:", text); }
+  };
+  const pasteBackup = () => {
+    const text = window.prompt("Pega aquí tu respaldo (el texto que copiaste antes):");
+    if (!text) return;
+    try { applyBackup(JSON.parse(text)); alert("✓ Respaldo cargado."); }
+    catch (e) { alert("Ese texto no es un respaldo válido."); }
+  };
   useEffect(() => save(K.buys, purchases), [purchases]);
   useEffect(() => save(K.prefs, { unit, useManual, manualPrice }), [unit, useManual, manualPrice]);
   useEffect(() => save(K.assume, assume), [assume]);
@@ -203,11 +221,13 @@ function App() {
         {/* Toolbar respaldo */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 12px", marginBottom: 20 }}>
           <span style={{ fontSize: 12, color: C.dim, marginRight: 4 }}>🛟 Respaldo de tus datos:</span>
-          <button onClick={exportData} style={{ background: C.orange, color: "#000", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>↓ Exportar a mi dispositivo</button>
-          <button onClick={() => fileRef.current?.click()} style={{ background: C.panel2, color: C.text, border: `1px solid ${C.line}`, borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>↑ Importar respaldo</button>
+          <button onClick={copyBackup} style={{ background: C.green, color: "#000", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>📋 Copiar respaldo</button>
+          <button onClick={pasteBackup} style={{ background: C.panel2, color: C.text, border: `1px solid ${C.line}`, borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>📥 Pegar respaldo</button>
+          <button onClick={exportData} style={{ background: C.panel2, color: C.dim, border: `1px solid ${C.line}`, borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>↓ Exportar archivo</button>
+          <button onClick={() => fileRef.current?.click()} style={{ background: C.panel2, color: C.dim, border: `1px solid ${C.line}`, borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>↑ Importar archivo</button>
           <input ref={fileRef} type="file" accept="application/json,.json" onChange={importData} style={{ display: "none" }} />
           <span style={{ fontSize: 11, color: C.faint, flexBasis: "100%", lineHeight: 1.5 }}>
-            Exporta de vez en cuando para tener una copia en tu celular/PC. Si algún día la app aparece vacía, vuelve a importar ese archivo y recuperas todo.
+            <b style={{ color: C.green }}>📋 Copiar respaldo</b> es lo más fácil: copia tus datos y los pegas en una nota o mensaje para ti mismo. Para pasarlos a otro equipo (ej. del PC al teléfono), copia aquí y usa <b style={{ color: C.text }}>📥 Pegar respaldo</b> allá. No necesitas abrir ningún archivo.
           </span>
         </div>
 
@@ -253,7 +273,22 @@ function Assumptions({ assume, setAssume }) {
             ))}
           </div>
         </div>
-        <Slider label="Inflación anual" value={assume.inflation} min={0} max={50} step={0.5} suffix="%" onChange={(v) => set("inflation", v)} accent={C.violet} />
+        <div>
+          <Slider label="Inflación anual (promedio)" value={assume.inflation} min={0} max={50} step={0.5} suffix="%" onChange={(v) => set("inflation", v)} accent={C.violet} />
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            {[{ l: "Baja", v: 3 }, { l: "Media", v: 5 }, { l: "Alta", v: 8 }, { l: "Muy alta", v: 12 }].map((p) => (
+              <button key={p.l} onClick={() => set("inflation", p.v)} style={{
+                flex: 1, fontSize: 11, padding: "5px 0", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
+                background: assume.inflation === p.v ? "rgba(167,139,250,0.15)" : C.panel2, color: assume.inflation === p.v ? C.violet : C.dim,
+                border: `1px solid ${assume.inflation === p.v ? C.violet : C.line}`,
+              }}>{p.l} {p.v}%</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+            Solo pon el promedio <b>por año</b> — la app lo acumula sola durante los {assume.horizon} años. EE.UU. histórico ≈ 3%, LATAM ≈ 5-8%.
+            <br />En {assume.horizon} años los precios se multiplicarían <b style={{ color: C.violet }}>×{Math.pow(1 + assume.inflation / 100, assume.horizon).toFixed(2)}</b> (o sea, $100 de hoy = <b style={{ color: C.violet }}>${(100 * Math.pow(1 + assume.inflation / 100, assume.horizon)).toFixed(0)}</b> de futuro).
+          </div>
+        </div>
         <NumberField label="Costo de vida anual (hoy)" value={assume.costOfLiving} onChange={(v) => set("costOfLiving", v)} prefix="$" />
       </div>
     </div>
@@ -462,8 +497,14 @@ function BigBuys({ assume, bigBuys, setBigBuys, livePrice }) {
           <Field label="Monto a invertir (USD)">
             <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} style={inp} placeholder="10000" />
           </Field>
-          <Field label={`En qué año lo harás (0 = hoy, máx ${H})`}>
-            <input type="number" min={0} max={H} value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value })} style={inp} placeholder="0" />
+          <Field label="¿Cuándo lo comprarás?">
+            <select value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value })} style={{ ...inp, cursor: "pointer" }}>
+              {Array.from({ length: H + 1 }, (_, t) => {
+                const yr = new Date().getFullYear() + t;
+                const label = t === 0 ? `Ahora (${yr})` : `${yr} · dentro de ${t} año${t > 1 ? "s" : ""}`;
+                return <option key={t} value={t} style={{ background: C.panel2, color: C.text }}>{label}</option>;
+              })}
+            </select>
           </Field>
           <button onClick={add} style={{ background: C.orange, color: "#000", border: "none", borderRadius: 8, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", height: 40 }}>+ Añadir</button>
         </div>
@@ -661,31 +702,31 @@ function Tracker({ purchases, setPurchases, livePrice, unit, setUnit }) {
               <span style={{ color: C.red }}>● sobre el promedio</span>
             </span>
           </div>
-          <ResponsiveContainer width="100%" height={250}>
+          <ResponsiveContainer width="100%" height={320}>
             <ScatterChart margin={{ top: 10, right: 18, left: 0, bottom: 4 }}>
               <CartesianGrid stroke={C.line} />
               <XAxis type="number" dataKey="i" name="Compra" stroke={C.faint} domain={[0.5, scatterData.length + 0.5]}
                 tickCount={Math.min(scatterData.length + 1, 12)} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}
                 tickFormatter={(v) => Number.isInteger(v) && v >= 1 ? `#${v}` : ""} />
-              <YAxis type="number" dataKey="price" name="Precio" stroke={C.faint}
+              <YAxis type="number" dataKey="price" name="Precio" stroke={C.faint} domain={[(min) => Math.floor((min - 2000) / 1000) * 1000, (max) => Math.ceil((max + 2000) / 1000) * 1000]}
                 tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} width={52} />
-              <ZAxis type="number" dataKey="sats" range={[80, 600]} name="Sats" />
+              <ZAxis type="number" dataKey="sats" range={[18, 150]} name="Sats" />
               <Tooltip cursor={{ strokeDasharray: "3 3", stroke: C.faint }} contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
                 formatter={(v, n) => n === "Precio" ? [usd(v), "Precio compra"] : n === "Sats" ? [num(v) + " sats", "Cantidad"] : [v, n]}
                 labelFormatter={() => ""} />
               {active.avg > 0 && (
                 <ReferenceLine y={active.avg} stroke={C.orange} strokeWidth={1.5} strokeDasharray="5 4">
-                  <Label value={`promedio ${usd(active.avg)}`} position="insideTopLeft" fill={C.orange} fontSize={11} />
+                  <Label value={`promedio ${usd(active.avg)}`} position="insideTopRight" fill={C.orange} fontSize={11} />
                 </ReferenceLine>
               )}
               {livePrice > 0 && (
                 <ReferenceLine y={livePrice} stroke={C.green} strokeWidth={1.5} strokeDasharray="5 4">
-                  <Label value={`actual ${usd(livePrice)}`} position="insideBottomLeft" fill={C.green} fontSize={11} />
+                  <Label value={`actual ${usd(livePrice)}`} position="insideBottomRight" fill={C.green} fontSize={11} />
                 </ReferenceLine>
               )}
               <Scatter data={scatterData} fill={C.orange}>
                 {scatterData.map((d, idx) => (
-                  <Cell key={idx} fill={d.below ? C.green : C.red} fillOpacity={0.55} stroke={d.below ? C.green : C.red} />
+                  <Cell key={idx} fill={d.below ? C.green : C.red} fillOpacity={0.82} stroke={C.bg} strokeWidth={1.5} />
                 ))}
               </Scatter>
             </ScatterChart>
