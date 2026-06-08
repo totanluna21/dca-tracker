@@ -10,12 +10,22 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
 <script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
 <div id="root"><div id="boot">Cargando…</div></div>
 <script type="text/babel" data-presets="react">
+
+if (typeof React === "undefined" || typeof ReactDOM === "undefined" || typeof Recharts === "undefined") { document.getElementById("root").innerHTML = '<div style="color:#ececf1;font-family:sans-serif;padding:40px;text-align:center;line-height:1.6">No se pudieron cargar las librerias de la app.<br>Recarga la pagina con <b>Ctrl + F5</b>. Si sigue igual, avisame.</div>'; throw new Error("libs no cargaron"); }
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Area, ComposedChart, Legend, ScatterChart, Scatter, ZAxis, Cell, Label } = Recharts;
+const storage = {
+  get: async (k) => { try { const v = localStorage.getItem(k); return v != null ? { value: v } : null; } catch (e) { return null; } },
+  set: async (k, v) => { try { localStorage.setItem(k, v); return { ok: true }; } catch (e) { return null; } },
+};
+
 
 // ── Tema ─────────────────────────────────────────────────────────
 const C = {
@@ -893,7 +903,7 @@ function Marker({ pos, color, label, value, top }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+try { ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App)); } catch (e) { document.getElementById("root").innerHTML = '<pre style="color:#f87171;white-space:pre-wrap;font-family:monospace;padding:24px;font-size:13px">Error al iniciar la app: ' + (e && e.message ? e.message : e) + '</pre>'; }
 </script>
 </body>
 </html>
