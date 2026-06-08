@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BTC DCA · Tracker & Proyección</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>html,body,#root{margin:0;height:100%;background:#0a0a0c}#boot{color:#8a8a96;font-family:sans-serif;padding:40px;text-align:center}</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">Cargando…</div></div>
+<script type="text/babel" data-presets="react">
+
+// ── Tema ─────────────────────────────────────────────────────────
+const C = {
+  bg: "#0a0a0c", panel: "#121216", panel2: "#17171d", line: "#26262e",
+  text: "#ececf1", dim: "#8a8a96", faint: "#5a5a66",
+  orange: "#f7931a", orangeSoft: "rgba(247,147,26,0.12)",
+  green: "#34d399", red: "#f87171", blue: "#60a5fa", violet: "#a78bfa",
+};
+const SATS = 100_000_000;
+
+// claves de almacenamiento persistente
+const K = {
+  buys: "dca:purchases:v1", prefs: "dca:prefs:v1",
+  assume: "dca:assumptions:v2", plan: "dca:plan:v1", big: "dca:bigbuys:v1",
+};
+
+const usd = (n, max = 0) => isFinite(n)
+  ? n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: max })
+  : "—";
+const short = (n) => {
+  if (!isFinite(n)) return "—";
+  const a = Math.abs(n);
+  if (a >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (a >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `$${(n / 1e3).toFixed(0)}k`;
+  return `$${n.toFixed(0)}`;
+};
+const num = (n, d = 0) => isFinite(n) ? n.toLocaleString("en-US", { maximumFractionDigits: d }) : "—";
+const pct = (n) => isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%` : "—";
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+// FV de anualidad creciente (aportes al final de cada periodo, creciendo gc por periodo, valorados a r)
+function fvGrowingAnnuity(PMT, r, gc, n) {
+  if (n <= 0 || PMT <= 0) return 0;
+  if (Math.abs(r - gc) < 1e-12) return PMT * n * Math.pow(1 + r, n - 1);
+  return PMT * (Math.pow(1 + r, n) - Math.pow(1 + gc, n)) / (r - gc);
+}
+function totalContrib(PMT, gc, n) {
+  if (n <= 0 || PMT <= 0) return 0;
+  if (Math.abs(gc) < 1e-12) return PMT * n;
+  return PMT * (Math.pow(1 + gc, n) - 1) / gc;
+}
+
+function App() {
+  const [view, setView] = useState("tracker"); // tracker | dca | big
+  const [loaded, setLoaded] = useState(false);
+
+  const [purchases, setPurchases] = useState([]);
+  const [price, setPrice] = useState(null);
+  const [priceSource, setPriceSource] = useState("…");
+  const [manualPrice, setManualPrice] = useState("");
+  const [useManual, setUseManual] = useState(false);
+  const [unit, setUnit] = useState("sats");
+
+  // supuestos macro compartidos por las dos proyecciones
+  const [assume, setAssume] = useState({
+    horizon: 10, cagr: 15, inflation: 5, costOfLiving: 12000, growContrib: false,
+  });
+  const [plan, setPlan] = useState({ aporte: 50, freq: "monthly" });
+  const [bigBuys, setBigBuys] = useState([]);
+  const [savedAt, setSavedAt] = useState(0);
+  const [justSaved, setJustSaved] = useState(false);
+  useEffect(() => {
+    if (!savedAt) return;
+    setJustSaved(true);
+    const t = setTimeout(() => setJustSaved(false), 1600);
+    return () => clearTimeout(t);
+  }, [savedAt]);
+
+  // ── Persistencia ───────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      const load = async (key, set, transform) => {
+        try { const r = await storage.get(key); if (r?.value) set(transform ? transform(JSON.parse(r.value)) : JSON.parse(r.value)); } catch (e) {}
+      };
+      await load(K.buys, setPurchases);
+      await load(K.prefs, (p) => { if (p.unit) setUnit(p.unit); if (p.useManual) setUseManual(p.useManual); if (p.manualPrice) setManualPrice(p.manualPrice); });
+      await load(K.assume, (a) => setAssume((s) => ({ ...s, ...a })));
+      await load(K.plan, (p) => setPlan((s) => ({ ...s, ...p })));
+      await load(K.big, setBigBuys);
+      setLoaded(true);
+    })();
+  }, []);
+
+  const save = (key, val) => { if (loaded) storage.set(key, JSON.stringify(val)).then(() => setSavedAt(Date.now())).catch(() => {}); };
+
+  // ── Exportar / Importar (respaldo en cel o PC) ─────────────────
+  const fileRef = useRef(null);
+  const exportData = () => {
+    const data = { app: "btc-dca-tracker", version: 1, exportedAt: new Date().toISOString(), purchases, bigBuys, assume, plan };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `btc-dca-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const importData = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(reader.result);
+        if (Array.isArray(d.purchases)) setPurchases(d.purchases);
+        if (Array.isArray(d.bigBuys)) setBigBuys(d.bigBuys);
+        if (d.assume) setAssume((s) => ({ ...s, ...d.assume }));
+        if (d.plan) setPlan((s) => ({ ...s, ...d.plan }));
+        setSavedAt(Date.now());
+      } catch (err) { alert("Ese archivo no es un respaldo válido."); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+  useEffect(() => save(K.buys, purchases), [purchases]);
+  useEffect(() => save(K.prefs, { unit, useManual, manualPrice }), [unit, useManual, manualPrice]);
+  useEffect(() => save(K.assume, assume), [assume]);
+  useEffect(() => save(K.plan, plan), [plan]);
+  useEffect(() => save(K.big, bigBuys), [bigBuys]);
+
+  // ── Precio en vivo ─────────────────────────────────────────────
+  const fetchPrice = useCallback(async () => {
+    setPriceSource("…");
+    try {
+      const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+      const d = await res.json();
+      if (d?.bitcoin?.usd) { setPrice(d.bitcoin.usd); setPriceSource("CoinGecko · en vivo"); return; }
+      throw new Error();
+    } catch { setPriceSource("manual"); setUseManual(true); }
+  }, []);
+  useEffect(() => { fetchPrice(); const t = setInterval(fetchPrice, 60000); return () => clearInterval(t); }, [fetchPrice]);
+  const livePrice = useManual ? parseFloat(manualPrice) || 0 : price || 0;
+
+  const NAV = [
+    { k: "tracker", l: "Tracker", icon: "₿" },
+    { k: "dca", l: "Proyección DCA", icon: "↗" },
+    { k: "big", l: "Compras grandes", icon: "◆" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Sora', system-ui, sans-serif" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+        *::-webkit-scrollbar{height:8px;width:8px}*::-webkit-scrollbar-thumb{background:${C.line};border-radius:8px}
+        input::placeholder{color:${C.faint}} input[type=range]{accent-color:${C.orange}}`}</style>
+
+      <div style={{ maxWidth: 1040, margin: "0 auto", padding: "26px 18px 70px" }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 14, marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ width: 30, height: 30, borderRadius: 8, background: C.orange, color: "#000", display: "grid", placeItems: "center", fontWeight: 700, fontSize: 18 }}>₿</span>
+            <h1 style={{ margin: 0, fontSize: 21, fontWeight: 700, letterSpacing: -0.5 }}>BTC DCA · Tracker & Proyección</h1>
+          </div>
+          <PriceTag {...{ livePrice, priceSource, fetchPrice, useManual, setUseManual, manualPrice, setManualPrice }} />
+        </div>
+
+        {/* Nav */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 22, borderBottom: `1px solid ${C.line}`, paddingBottom: 2, alignItems: "center" }}>
+          {NAV.map((t) => (
+            <button key={t.k} onClick={() => setView(t.k)} style={{
+              background: "none", border: "none", borderBottom: `2px solid ${view === t.k ? C.orange : "transparent"}`,
+              color: view === t.k ? C.text : C.dim, padding: "9px 12px", fontSize: 14, fontWeight: 600,
+              cursor: "pointer", fontFamily: "inherit", display: "flex", gap: 7, alignItems: "center",
+            }}><span style={{ color: view === t.k ? C.orange : C.faint }}>{t.icon}</span>{t.l}</button>
+          ))}
+          <span style={{ marginLeft: "auto", fontSize: 11, display: "flex", alignItems: "center", gap: 5, color: justSaved ? C.green : C.faint, transition: "color .2s", whiteSpace: "nowrap" }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: justSaved ? C.green : C.faint }} />
+            {justSaved ? "Guardado ✓" : "Se guarda solo"}
+          </span>
+        </div>
+
+        {/* Toolbar respaldo */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 12px", marginBottom: 20 }}>
+          <span style={{ fontSize: 12, color: C.dim, marginRight: 4 }}>🛟 Respaldo de tus datos:</span>
+          <button onClick={exportData} style={{ background: C.orange, color: "#000", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>↓ Exportar a mi dispositivo</button>
+          <button onClick={() => fileRef.current?.click()} style={{ background: C.panel2, color: C.text, border: `1px solid ${C.line}`, borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>↑ Importar respaldo</button>
+          <input ref={fileRef} type="file" accept="application/json,.json" onChange={importData} style={{ display: "none" }} />
+          <span style={{ fontSize: 11, color: C.faint, flexBasis: "100%", lineHeight: 1.5 }}>
+            Exporta de vez en cuando para tener una copia en tu celular/PC. Si algún día la app aparece vacía, vuelve a importar ese archivo y recuperas todo.
+          </span>
+        </div>
+
+        {view === "tracker" && <Tracker {...{ purchases, setPurchases, livePrice, unit, setUnit }} />}
+        {(view === "dca" || view === "big") && (
+          <>
+            <Assumptions assume={assume} setAssume={setAssume} />
+            {view === "dca"
+              ? <DcaProjection {...{ assume, setAssume, plan, setPlan, livePrice }} />
+              : <BigBuys {...{ assume, bigBuys, setBigBuys, livePrice }} />}
+          </>
+        )}
+
+        <p style={{ color: C.faint, fontSize: 11, marginTop: 22, textAlign: "center", lineHeight: 1.6 }}>
+          Datos guardados localmente en este artifact. Las proyecciones usan una tasa de crecimiento <i>supuesta</i> y
+          constante — el precio real del BTC es volátil e impredecible. Es una herramienta de escenarios, no una predicción ni asesoría financiera.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// SUPUESTOS MACRO (compartidos)
+// ════════════════════════════════════════════════════════════════
+function Assumptions({ assume, setAssume }) {
+  const set = (k, v) => setAssume((s) => ({ ...s, [k]: v }));
+  const presets = [{ l: "Conservador", v: 8 }, { l: "Base", v: 15 }, { l: "Optimista", v: 28 }];
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, marginBottom: 20 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 14, color: C.dim, textTransform: "uppercase", letterSpacing: 0.6 }}>Supuestos (afectan ambas proyecciones)</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 18 }}>
+        <Slider label="Horizonte" value={assume.horizon} min={1} max={40} step={1} suffix=" años" onChange={(v) => set("horizon", v)} accent={C.orange} />
+        <div>
+          <Slider label="Crecimiento anual BTC (CAGR)" value={assume.cagr} min={-10} max={60} step={1} suffix="%" onChange={(v) => set("cagr", v)} accent={C.blue} />
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            {presets.map((p) => (
+              <button key={p.l} onClick={() => set("cagr", p.v)} style={{
+                flex: 1, fontSize: 11, padding: "5px 0", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
+                background: assume.cagr === p.v ? C.orangeSoft : C.panel2, color: assume.cagr === p.v ? C.orange : C.dim,
+                border: `1px solid ${assume.cagr === p.v ? C.orange : C.line}`,
+              }}>{p.l} {p.v}%</button>
+            ))}
+          </div>
+        </div>
+        <Slider label="Inflación anual" value={assume.inflation} min={0} max={50} step={0.5} suffix="%" onChange={(v) => set("inflation", v)} accent={C.violet} />
+        <NumberField label="Costo de vida anual (hoy)" value={assume.costOfLiving} onChange={(v) => set("costOfLiving", v)} prefix="$" />
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// PROYECCIÓN DCA (interés compuesto + inflación + costo de vida)
+// ════════════════════════════════════════════════════════════════
+function DcaProjection({ assume, setAssume, plan, setPlan, livePrice }) {
+  const ppy = plan.freq === "weekly" ? 52 : 12;
+  const g = assume.cagr / 100, i = assume.inflation / 100;
+  const cg = assume.growContrib ? i : 0; // aporte crece con inflación si está activo
+  const r = Math.pow(1 + g, 1 / ppy) - 1;
+  const gcP = Math.pow(1 + cg, 1 / ppy) - 1;
+  const PMT = parseFloat(plan.aporte) || 0;
+  const H = assume.horizon;
+
+  const proj = useMemo(() => {
+    const rows = [];
+    for (let y = 0; y <= H; y++) {
+      const n = y * ppy;
+      const nominal = fvGrowingAnnuity(PMT, r, gcP, n);
+      const contrib = totalContrib(PMT, gcP, n);
+      const real = nominal / Math.pow(1 + i, y);
+      const priceY = livePrice > 0 ? livePrice * Math.pow(1 + g, y) : 0;
+      const btc = priceY > 0 ? nominal / priceY : 0;
+      rows.push({ year: y, nominal, contrib, real, btc });
+    }
+    return rows;
+  }, [PMT, r, gcP, i, g, ppy, H, livePrice]);
+
+  const end = proj[proj.length - 1] || {};
+  const gain = (end.nominal || 0) - (end.contrib || 0);
+  const yearsCov = assume.costOfLiving > 0 ? end.real / assume.costOfLiving : 0;
+  const aporteAnual = PMT * ppy;
+
+  // proyección del PRECIO del BTC por año, con 3 escenarios para ver el rango
+  const gLow = Math.max(-0.99, (assume.cagr - 10) / 100);
+  const gHigh = (assume.cagr + 13) / 100;
+  const priceProj = useMemo(() => {
+    if (livePrice <= 0) return [];
+    const rows = [];
+    for (let y = 0; y <= H; y++) {
+      rows.push({
+        year: y,
+        base: livePrice * Math.pow(1 + g, y),
+        low: livePrice * Math.pow(1 + gLow, y),
+        high: livePrice * Math.pow(1 + gHigh, y),
+      });
+    }
+    return rows;
+  }, [livePrice, g, gLow, gHigh, H]);
+
+  return (
+    <div>
+      {/* inputs DCA */}
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 14, alignItems: "end" }}>
+          <Field label="Aporte recurrente (USD)">
+            <input type="number" value={plan.aporte} onChange={(e) => setPlan({ ...plan, aporte: e.target.value })} style={inp} placeholder="50" />
+          </Field>
+          <Field label="Frecuencia">
+            <div style={{ display: "flex", gap: 6 }}>
+              {[{ k: "weekly", l: "Semanal" }, { k: "monthly", l: "Mensual" }].map((f) => (
+                <Toggle key={f.k} active={plan.freq === f.k} onClick={() => setPlan({ ...plan, freq: f.k })}>{f.l}</Toggle>
+              ))}
+            </div>
+          </Field>
+          <Field label="Aporte ≈ anual">
+            <div style={{ ...inp, color: C.dim, display: "flex", alignItems: "center" }}>{usd(aporteAnual)}</div>
+          </Field>
+        </div>
+      </div>
+
+      {/* resumen */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 18 }}>
+        <Stat label={`Aportado en ${H} años`} value={usd(end.contrib)} sub={`${num(H * ppy)} aportes`} />
+        <Stat label="Valor proyectado (nominal)" value={short(end.nominal)} accent={C.orange} sub={usd(end.nominal)} />
+        <Stat label="Valor real (hoy)" value={short(end.real)} accent={C.violet} sub="ajustado por inflación" />
+        <Stat label="Ganancia compuesta" value={short(gain)} accent={C.green} sub={pct(end.contrib > 0 ? (gain / end.contrib) * 100 : 0)} />
+        <Stat label="BTC proyectado" value={`${(end.btc || 0).toFixed(4)}`} accent={C.blue} sub={`${num(Math.round((end.btc || 0) * SATS))} sats`} />
+      </div>
+
+      {/* costo de vida */}
+      <CostOfLivingCard yearsCov={yearsCov} real={end.real} assume={assume} />
+
+      {/* toggle aporte creciente con inflación */}
+      <div onClick={() => setAssume((s) => ({ ...s, growContrib: !s.growContrib }))}
+        style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 6px", padding: "12px 14px", background: C.panel, border: `1px solid ${assume.growContrib ? C.orange : C.line}`, borderRadius: 10, cursor: "pointer" }}>
+        <div style={{ width: 38, height: 22, borderRadius: 999, background: assume.growContrib ? C.orange : C.line, position: "relative", transition: "background .15s", flexShrink: 0 }}>
+          <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: assume.growContrib ? 19 : 3, transition: "left .15s" }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>Subir el aporte cada año con la inflación</div>
+          <div style={{ fontSize: 12, color: C.dim }}>Mantiene el poder de compra de tu DCA (crece {assume.inflation}%/año).</div>
+        </div>
+      </div>
+
+      {/* gráfica compuesta */}
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "16px 12px 8px", marginTop: 12 }}>
+        <div style={{ fontSize: 13, color: C.dim, padding: "0 6px 8px", fontWeight: 600 }}>Crecimiento compuesto vs. lo aportado</div>
+        <ResponsiveContainer width="100%" height={280}>
+          <ComposedChart data={proj} margin={{ top: 6, right: 16, left: 4, bottom: 0 }}>
+            <defs>
+              <linearGradient id="gN" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.orange} stopOpacity={0.4} /><stop offset="100%" stopColor={C.orange} stopOpacity={0} /></linearGradient>
+            </defs>
+            <CartesianGrid stroke={C.line} vertical={false} />
+            <XAxis dataKey="year" stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={(v) => `${v}a`} />
+            <YAxis stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={short} width={52} />
+            <Tooltip contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+              labelFormatter={(v) => `Año ${v}`} formatter={(v, n) => [usd(v), n === "nominal" ? "Valor nominal" : n === "real" ? "Valor real (hoy)" : "Aportado"]} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Area type="monotone" dataKey="nominal" name="Valor nominal" stroke={C.orange} strokeWidth={2.5} fill="url(#gN)" />
+            <Line type="monotone" dataKey="real" name="Valor real (hoy)" stroke={C.violet} strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="contrib" name="Aportado" stroke={C.dim} strokeWidth={1.5} strokeDasharray="4 4" dot={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* gráfica precio BTC por año */}
+      {priceProj.length > 1 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "16px 12px 8px", marginTop: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0 6px 8px", flexWrap: "wrap", gap: 6 }}>
+            <span style={{ fontSize: 13, color: C.dim, fontWeight: 600 }}>Precio BTC proyectado por año (curva exponencial)</span>
+            <span style={{ fontSize: 11, color: C.faint }}>
+              Año {H}: <b style={{ color: C.orange, fontFamily: "'JetBrains Mono', monospace" }}>{short(priceProj[priceProj.length - 1].base)}</b>
+            </span>
+          </div>
+          <ResponsiveContainer width="100%" height={260}>
+            <ComposedChart data={priceProj} margin={{ top: 6, right: 16, left: 4, bottom: 0 }}>
+              <defs>
+                <linearGradient id="gP" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.orange} stopOpacity={0.35} /><stop offset="100%" stopColor={C.orange} stopOpacity={0} /></linearGradient>
+              </defs>
+              <CartesianGrid stroke={C.line} vertical={false} />
+              <XAxis dataKey="year" stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={(v) => `${v}a`} />
+              <YAxis stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={short} width={56} />
+              <Tooltip contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                labelFormatter={(v) => `Año ${v}`} formatter={(v, n) => [usd(v), n === "base" ? `Tu escenario (${assume.cagr}%)` : n === "low" ? `Bajo (${assume.cagr - 10}%)` : `Alto (${assume.cagr + 13}%)`]} />
+              <Legend wrapperStyle={{ fontSize: 12 }} formatter={(n) => n === "base" ? `Tu escenario (${assume.cagr}%)` : n === "low" ? `Bajo (${assume.cagr - 10}%)` : `Alto (${assume.cagr + 13}%)`} />
+              <Area type="monotone" dataKey="base" name="base" stroke={C.orange} strokeWidth={2.5} fill="url(#gP)" />
+              <Line type="monotone" dataKey="high" name="high" stroke={C.green} strokeWidth={1.5} strokeDasharray="5 4" dot={false} />
+              <Line type="monotone" dataKey="low" name="low" stroke={C.blue} strokeWidth={1.5} strokeDasharray="5 4" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+          <div style={{ fontSize: 11, color: C.faint, padding: "4px 6px 2px", lineHeight: 1.5 }}>
+            La curva sube de forma exponencial con un CAGR constante. Las líneas punteadas marcan un escenario más bajo y uno más alto para ver el rango posible — el precio real fluctúa con subidas y caídas que este modelo promedia.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// ════════════════════════════════════════════════════════════════
+function BigBuys({ assume, bigBuys, setBigBuys, livePrice }) {
+  const g = assume.cagr / 100, i = assume.inflation / 100, H = assume.horizon;
+  const [form, setForm] = useState({ amount: "", year: 0 });
+
+  const add = () => {
+    if (!form.amount) return;
+    setBigBuys((p) => [...p, { id: uid(), amount: form.amount, year: Math.min(form.year, H) }]);
+    setForm({ amount: "", year: 0 });
+  };
+  const del = (id) => setBigBuys((p) => p.filter((b) => b.id !== id));
+
+  const rows = useMemo(() => bigBuys.map((b) => {
+    const amt = parseFloat(b.amount) || 0;
+    const t = Math.min(parseFloat(b.year) || 0, H);
+    const years = H - t;
+    const nominal = amt * Math.pow(1 + g, years);
+    const real = nominal / Math.pow(1 + i, H);
+    const priceAtBuy = livePrice > 0 ? livePrice * Math.pow(1 + g, t) : 0;
+    const btc = priceAtBuy > 0 ? amt / priceAtBuy : 0;
+    return { ...b, amt, t, nominal, real, btc };
+  }), [bigBuys, g, i, H, livePrice]);
+
+  const tot = rows.reduce((a, r) => ({
+    invested: a.invested + r.amt, nominal: a.nominal + r.nominal,
+    real: a.real + r.real, btc: a.btc + r.btc,
+  }), { invested: 0, nominal: 0, real: 0, btc: 0 });
+  const gain = tot.nominal - tot.invested;
+  const yearsCov = assume.costOfLiving > 0 ? tot.real / assume.costOfLiving : 0;
+
+  // valor del portafolio de compras grandes año por año
+  const bigProj = useMemo(() => {
+    const out = [];
+    for (let y = 0; y <= H; y++) {
+      let value = 0, invested = 0;
+      rows.forEach((r) => {
+        if (r.t <= y) { value += r.amt * Math.pow(1 + g, y - r.t); invested += r.amt; }
+      });
+      out.push({ year: y, value, invested });
+    }
+    return out;
+  }, [rows, g, H]);
+
+  return (
+    <div>
+      <div style={{ background: C.orangeSoft, border: `1px solid ${C.orange}33`, borderRadius: 10, padding: "11px 14px", marginBottom: 18, fontSize: 13, color: C.dim }}>
+        Ventanilla independiente del DCA: aquí registras los <b style={{ color: C.text }}>montos grandes</b> que planeas meter en años específicos. Usa los mismos supuestos macro de arriba pero <b style={{ color: C.text }}>no se mezcla</b> con tu DCA recurrente.
+      </div>
+
+      {/* form */}
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end" }}>
+          <Field label="Monto a invertir (USD)">
+            <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} style={inp} placeholder="10000" />
+          </Field>
+          <Field label={`En qué año lo harás (0 = hoy, máx ${H})`}>
+            <input type="number" min={0} max={H} value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value })} style={inp} placeholder="0" />
+          </Field>
+          <button onClick={add} style={{ background: C.orange, color: "#000", border: "none", borderRadius: 8, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", height: 40 }}>+ Añadir</button>
+        </div>
+      </div>
+
+      {/* resumen */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 18 }}>
+        <Stat label="Total a invertir" value={usd(tot.invested)} />
+        <Stat label={`Valor en año ${H} (nominal)`} value={short(tot.nominal)} accent={C.orange} sub={usd(tot.nominal)} />
+        <Stat label="Valor real (hoy)" value={short(tot.real)} accent={C.violet} />
+        <Stat label="Ganancia compuesta" value={short(gain)} accent={C.green} sub={pct(tot.invested > 0 ? (gain / tot.invested) * 100 : 0)} />
+        <Stat label="BTC proyectado" value={tot.btc.toFixed(4)} accent={C.blue} sub={`${num(Math.round(tot.btc * SATS))} sats`} />
+      </div>
+
+      <CostOfLivingCard yearsCov={yearsCov} real={tot.real} assume={assume} />
+
+      {/* gráfica valor por año de las compras grandes */}
+      {rows.length > 0 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "16px 12px 8px", marginTop: 18 }}>
+          <div style={{ fontSize: 13, color: C.dim, padding: "0 6px 8px", fontWeight: 600 }}>Valor de tus compras grandes por año</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <ComposedChart data={bigProj} margin={{ top: 6, right: 16, left: 4, bottom: 0 }}>
+              <defs>
+                <linearGradient id="gB" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.orange} stopOpacity={0.35} /><stop offset="100%" stopColor={C.orange} stopOpacity={0} /></linearGradient>
+              </defs>
+              <CartesianGrid stroke={C.line} vertical={false} />
+              <XAxis dataKey="year" stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={(v) => `${v}a`} />
+              <YAxis stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={short} width={56} />
+              <Tooltip contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                labelFormatter={(v) => `Año ${v}`} formatter={(v, n) => [usd(v), n === "value" ? "Valor proyectado" : "Invertido"]} />
+              <Legend wrapperStyle={{ fontSize: 12 }} formatter={(n) => n === "value" ? "Valor proyectado" : "Invertido"} />
+              <Area type="monotone" dataKey="value" name="value" stroke={C.orange} strokeWidth={2.5} fill="url(#gB)" />
+              <Line type="stepAfter" dataKey="invested" name="invested" stroke={C.dim} strokeWidth={1.5} strokeDasharray="4 4" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+          <div style={{ fontSize: 11, color: C.faint, padding: "4px 6px 2px" }}>
+            Cada monto se capitaliza desde el año en que lo metes. Los escalones de la línea punteada marcan cuándo entra capital nuevo.
+          </div>
+        </div>
+      )}
+
+      {/* lista */}
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, overflow: "hidden", marginTop: 18 }}>
+        {rows.length === 0 ? (
+          <div style={{ padding: 36, textAlign: "center", color: C.faint, fontSize: 14 }}>Sin compras grandes planeadas. Añade un monto y el año arriba.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: C.dim, textAlign: "left", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  {["Año", "Monto", `Valor año ${H}`, "Valor real", "BTC", ""].map((h) => (
+                    <th key={h} style={{ padding: "11px 14px", borderBottom: `1px solid ${C.line}`, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                {rows.sort((a, b) => a.t - b.t).map((r) => (
+                  <tr key={r.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+                    <td style={{ padding: "11px 14px", color: C.dim }}>{r.t === 0 ? "Hoy" : `+${r.t}a`}</td>
+                    <td style={{ padding: "11px 14px" }}>{usd(r.amt)}</td>
+                    <td style={{ padding: "11px 14px", color: C.orange }}>{short(r.nominal)}</td>
+                    <td style={{ padding: "11px 14px", color: C.violet }}>{short(r.real)}</td>
+                    <td style={{ padding: "11px 14px", color: C.blue }}>{r.btc.toFixed(4)}</td>
+                    <td style={{ padding: "11px 14px" }}><button onClick={() => del(r.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer" }}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// TRACKER (compras reales)
+// ════════════════════════════════════════════════════════════════
+function Tracker({ purchases, setPurchases, livePrice, unit, setUnit }) {
+  const [filter, setFilter] = useState("all");
+  const blank = { date: new Date().toISOString().slice(0, 10), amount: "", buyPrice: "", type: "dca" };
+  const [form, setForm] = useState(blank);
+  const [editId, setEditId] = useState(null);
+  const imgRef = useRef(null);
+  const [imgBusy, setImgBusy] = useState(false);
+  const [imgErr, setImgErr] = useState("");
+  const [pending, setPending] = useState([]);
+  const downscale = (file) => new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const max = 1568; let w = img.width, h = img.height;
+      if (Math.max(w, h) > max) { const s = max / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+      const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(cv.toDataURL("image/jpeg", 0.9).split(",")[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+  const onImg = async (e) => {
+    const file = e.target.files && e.target.files[0]; if (e.target) e.target.value = ""; if (!file) return;
+    setImgErr(""); setImgBusy(true); setPending([]);
+    try {
+      const b64 = await downscale(file);
+      if (!b64) throw new Error("No se pudo procesar la imagen.");
+      const resp = await fetch("/api/extract", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ image: b64, media_type: "image/jpeg" }) });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Error del servidor");
+      const rows = (data.purchases || []).map((p) => ({ id: uid(), date: p.date || new Date().toISOString().slice(0, 10), amount: p.amountBtc != null ? String(p.amountBtc) : "", unit: "btc", buyPrice: p.priceUsd != null ? String(p.priceUsd) : "", type: "dca" }));
+      if (rows.length === 0) setImgErr("No detecté compras en la imagen. Prueba con una captura más nítida que muestre precio y cantidad.");
+      setPending(rows);
+    } catch (err) { setImgErr(err.message || "No se pudo leer la imagen."); }
+    setImgBusy(false);
+  };
+  const setPend = (id, k, v) => setPending((ps) => ps.map((r) => r.id === id ? { ...r, [k]: v } : r));
+  const delPend = (id) => setPending((ps) => ps.filter((r) => r.id !== id));
+  const confirmPending = () => { setPurchases((p) => [...p, ...pending.map((r) => ({ ...r, id: uid() }))]); setPending([]); };
+
+
+  const toBTC = (p) => { const a = parseFloat(p.amount) || 0; return p.unit === "sats" ? a / SATS : a; };
+  const stats = (list) => {
+    let btc = 0, cost = 0;
+    list.forEach((p) => { const b = toBTC(p); btc += b; cost += b * (parseFloat(p.buyPrice) || 0); });
+    const avg = btc > 0 ? cost / btc : 0, value = btc * livePrice, pnl = value - cost;
+    return { btc, sats: Math.round(btc * SATS), cost, avg, value, pnl, pnlPct: cost > 0 ? (pnl / cost) * 100 : 0, n: list.length };
+  };
+  const dcaList = purchases.filter((p) => p.type === "dca");
+  const holdList = purchases.filter((p) => p.type === "hold");
+  const all = useMemo(() => stats(purchases), [purchases, livePrice]);
+  const dca = useMemo(() => stats(dcaList), [purchases, livePrice]);
+  const hold = useMemo(() => stats(holdList), [purchases, livePrice]);
+  const active = filter === "dca" ? dca : filter === "hold" ? hold : all;
+  const activeList = filter === "dca" ? dcaList : filter === "hold" ? holdList : purchases;
+
+  const chartData = useMemo(() => {
+    const sorted = [...activeList].sort((a, b) => a.date.localeCompare(b.date));
+    let btc = 0, cost = 0;
+    return sorted.map((p) => { const b = toBTC(p); btc += b; cost += b * (parseFloat(p.buyPrice) || 0); return { date: p.date.slice(5), compra: parseFloat(p.buyPrice) || 0, promedio: btc > 0 ? cost / btc : 0 }; });
+  }, [activeList]);
+
+  // posición de cada compra (precio) respecto al promedio
+  const scatterData = useMemo(() => {
+    const sorted = [...activeList].sort((a, b) => a.date.localeCompare(b.date));
+    return sorted.map((p, idx) => {
+      const price = parseFloat(p.buyPrice) || 0;
+      const sats = Math.round(toBTC(p) * SATS);
+      return { i: idx + 1, price, sats, date: p.date, below: active.avg > 0 ? price <= active.avg : true };
+    });
+  }, [activeList, active.avg]);
+
+  const submit = () => {
+    if (!form.amount || !form.buyPrice) return;
+    if (editId) { setPurchases((p) => p.map((x) => x.id === editId ? { ...x, ...form, unit } : x)); setEditId(null); }
+    else setPurchases((p) => [...p, { id: uid(), ...form, unit }]);
+    setForm({ ...blank });
+  };
+  const edit = (p) => { setEditId(p.id); setUnit(p.unit || "sats"); setForm({ date: p.date, amount: p.amount, buyPrice: p.buyPrice, type: p.type }); };
+  const del = (id) => { setPurchases((p) => p.filter((x) => x.id !== id)); if (editId === id) { setEditId(null); setForm({ ...blank }); } };
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 18 }}>
+        <Stat label="Total invertido" value={usd(all.cost)} />
+        <Stat label="Sats acumulados" value={num(all.sats)} sub={`${all.btc.toFixed(8)} BTC`} accent={C.orange} />
+        <Stat label="Precio promedio (DCA)" value={usd(all.avg)} accent={C.blue} />
+        <Stat label="Valor actual" value={usd(all.value)} />
+        <Stat label="P&L" value={usd(all.pnl)} sub={pct(all.pnlPct)} accent={all.pnl >= 0 ? C.green : C.red} />
+      </div>
+
+      {all.avg > 0 && livePrice > 0 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "14px 16px", marginBottom: 18 }}>
+          <PositionBar avg={all.avg} price={livePrice} />
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[{ k: "all", l: `Todo (${all.n})` }, { k: "dca", l: `DCA (${dca.n})` }, { k: "hold", l: `Largo plazo (${hold.n})` }].map((t) => (
+          <button key={t.k} onClick={() => setFilter(t.k)} style={{
+            background: filter === t.k ? C.orange : C.panel, color: filter === t.k ? "#000" : C.dim,
+            border: `1px solid ${filter === t.k ? C.orange : C.line}`, borderRadius: 999, padding: "7px 16px",
+            fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+          }}>{t.l}</button>
+        ))}
+      </div>
+
+      {/* posición de cada compra */}
+      {scatterData.length > 0 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "16px 12px 8px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0 6px 10px", flexWrap: "wrap", gap: 6 }}>
+            <span style={{ fontSize: 13, color: C.dim, fontWeight: 600 }}>Posición de cada compra (tamaño = cuánto compraste)</span>
+            <span style={{ fontSize: 11, color: C.faint, display: "flex", gap: 12 }}>
+              <span style={{ color: C.green }}>● bajo el promedio</span>
+              <span style={{ color: C.red }}>● sobre el promedio</span>
+            </span>
+          </div>
+          <ResponsiveContainer width="100%" height={250}>
+            <ScatterChart margin={{ top: 10, right: 18, left: 0, bottom: 4 }}>
+              <CartesianGrid stroke={C.line} />
+              <XAxis type="number" dataKey="i" name="Compra" stroke={C.faint} domain={[0.5, scatterData.length + 0.5]}
+                tickCount={Math.min(scatterData.length + 1, 12)} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}
+                tickFormatter={(v) => Number.isInteger(v) && v >= 1 ? `#${v}` : ""} />
+              <YAxis type="number" dataKey="price" name="Precio" stroke={C.faint}
+                tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} width={52} />
+              <ZAxis type="number" dataKey="sats" range={[80, 600]} name="Sats" />
+              <Tooltip cursor={{ strokeDasharray: "3 3", stroke: C.faint }} contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                formatter={(v, n) => n === "Precio" ? [usd(v), "Precio compra"] : n === "Sats" ? [num(v) + " sats", "Cantidad"] : [v, n]}
+                labelFormatter={() => ""} />
+              {active.avg > 0 && (
+                <ReferenceLine y={active.avg} stroke={C.orange} strokeWidth={1.5} strokeDasharray="5 4">
+                  <Label value={`promedio ${usd(active.avg)}`} position="insideTopLeft" fill={C.orange} fontSize={11} />
+                </ReferenceLine>
+              )}
+              {livePrice > 0 && (
+                <ReferenceLine y={livePrice} stroke={C.green} strokeWidth={1.5} strokeDasharray="5 4">
+                  <Label value={`actual ${usd(livePrice)}`} position="insideBottomLeft" fill={C.green} fontSize={11} />
+                </ReferenceLine>
+              )}
+              <Scatter data={scatterData} fill={C.orange}>
+                {scatterData.map((d, idx) => (
+                  <Cell key={idx} fill={d.below ? C.green : C.red} fillOpacity={0.55} stroke={d.below ? C.green : C.red} />
+                ))}
+              </Scatter>
+            </ScatterChart>
+          </ResponsiveContainer>
+          <div style={{ fontSize: 11, color: C.faint, padding: "4px 6px 2px", lineHeight: 1.5 }}>
+            Cada punto es una compra en orden (#1, #2, #3…). La línea naranja es tu precio promedio y la verde el precio actual. Las compras verdes quedaron por debajo de tu promedio (bajaron tu costo); las rojas por encima.
+          </div>
+        </div>
+      )}
+
+      {chartData.length > 1 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "16px 12px 8px", marginBottom: 22 }}>
+          <div style={{ fontSize: 13, color: C.dim, padding: "0 6px 8px", fontWeight: 600 }}>Precio de compra vs. promedio acumulado</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart data={chartData} margin={{ top: 6, right: 14, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke={C.line} vertical={false} />
+              <XAxis dataKey="date" stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} />
+              <YAxis stroke={C.faint} tick={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} width={48} />
+              <Tooltip contentStyle={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }} formatter={(v, n) => [usd(v), n === "compra" ? "Compra" : "Promedio"]} />
+              {livePrice > 0 && <ReferenceLine y={livePrice} stroke={C.green} strokeDasharray="4 4" />}
+              <Line type="monotone" dataKey="compra" stroke={C.dim} strokeWidth={1.5} dot={{ r: 3, fill: C.dim }} />
+              <Line type="monotone" dataKey="promedio" stroke={C.orange} strokeWidth={2.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* subir captura / foto */}
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button onClick={() => imgRef.current && imgRef.current.click()} disabled={imgBusy} style={{ background: C.orange, color: "#000", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 14, fontWeight: 700, cursor: imgBusy ? "default" : "pointer", fontFamily: "inherit", opacity: imgBusy ? 0.6 : 1 }}>
+            {imgBusy ? "Leyendo imagen…" : "📷 Subir captura / foto"}
+          </button>
+          <input ref={imgRef} type="file" accept="image/*" onChange={onImg} style={{ display: "none" }} />
+          <span style={{ fontSize: 12, color: C.dim }}>Sube un pantallazo de tu exchange y la app detecta precio, cantidad y fecha.</span>
+        </div>
+        {imgErr && <div style={{ marginTop: 10, fontSize: 13, color: C.red }}>{imgErr}</div>}
+        {pending.length > 0 && (
+          <div style={{ marginTop: 14, borderTop: `1px solid ${C.line}`, paddingTop: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: C.text }}>Revisa lo detectado antes de guardar ({pending.length}):</div>
+            {pending.map((r) => (
+              <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.1fr auto auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <input type="date" value={r.date} onChange={(e) => setPend(r.id, "date", e.target.value)} style={inp} />
+                <input type="number" value={r.amount} onChange={(e) => setPend(r.id, "amount", e.target.value)} placeholder="BTC" style={inp} />
+                <input type="number" value={r.buyPrice} onChange={(e) => setPend(r.id, "buyPrice", e.target.value)} placeholder="precio USD" style={inp} />
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[{ k: "dca", l: "DCA" }, { k: "hold", l: "Largo" }].map((t) => (
+                    <button key={t.k} onClick={() => setPend(r.id, "type", t.k)} style={{ padding: "7px 9px", borderRadius: 7, fontSize: 12, cursor: "pointer", fontFamily: "inherit", background: r.type === t.k ? C.orangeSoft : C.panel2, color: r.type === t.k ? C.orange : C.dim, border: `1px solid ${r.type === t.k ? C.orange : C.line}` }}>{t.l}</button>
+                  ))}
+                </div>
+                <button onClick={() => delPend(r.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 16 }}>✕</button>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button onClick={confirmPending} style={{ background: C.green, color: "#000", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>✓ Añadir {pending.length} compra(s)</button>
+              <button onClick={() => setPending([])} style={{ background: C.panel2, color: C.dim, border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 14px", cursor: "pointer", fontFamily: "inherit" }}>Cancelar</button>
+            </div>
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Verifica siempre los números: la lectura automática puede equivocarse.</div>
+          </div>
+        )}
+      </div>
+
+      {/* form */}
+      <div style={{ background: C.panel, border: `1px solid ${editId ? C.orange : C.line}`, borderRadius: 12, padding: 16, marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>{editId ? "Editar compra" : "Registrar compra"}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, alignItems: "end" }}>
+          <Field label="Fecha"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} style={inp} /></Field>
+          <Field label={`Cantidad (${unit === "sats" ? "sats" : "BTC"})`}><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder={unit === "sats" ? "250000" : "0.0025"} style={inp} /></Field>
+          <Field label="Unidad"><div style={{ display: "flex", gap: 6 }}>{["sats", "btc"].map((u) => <Toggle key={u} active={unit === u} onClick={() => setUnit(u)}>{u.toUpperCase()}</Toggle>)}</div></Field>
+          <Field label="Precio compra (USD/BTC)"><input type="number" value={form.buyPrice} onChange={(e) => setForm({ ...form, buyPrice: e.target.value })} placeholder="65000" style={inp} /></Field>
+          <Field label="Tipo"><div style={{ display: "flex", gap: 6 }}>{[{ k: "dca", l: "DCA" }, { k: "hold", l: "Largo" }].map((t) => <Toggle key={t.k} active={form.type === t.k} onClick={() => setForm({ ...form, type: t.k })}>{t.l}</Toggle>)}</div></Field>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={submit} style={{ flex: 1, background: C.orange, color: "#000", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{editId ? "Guardar" : "+ Añadir"}</button>
+            {editId && <button onClick={() => { setEditId(null); setForm({ ...blank }); }} style={{ background: C.panel2, color: C.dim, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 14px", cursor: "pointer", fontFamily: "inherit" }}>✕</button>}
+          </div>
+        </div>
+      </div>
+
+      {/* lista */}
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, overflow: "hidden" }}>
+        {activeList.length === 0 ? (
+          <div style={{ padding: 40, textAlign: "center", color: C.faint, fontSize: 14 }}>Sin compras registradas todavía.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead><tr style={{ color: C.dim, textAlign: "left", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                {["Fecha", "Tipo", "Cantidad", "Precio", "Costo", "Valor act.", "P&L", ""].map((h) => <th key={h} style={{ padding: "11px 14px", borderBottom: `1px solid ${C.line}`, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>)}
+              </tr></thead>
+              <tbody style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                {[...activeList].sort((a, b) => b.date.localeCompare(a.date)).map((p) => {
+                  const b = toBTC(p), cost = b * (parseFloat(p.buyPrice) || 0), value = b * livePrice, pnl = value - cost;
+                  return (
+                    <tr key={p.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+                      <td style={{ padding: "11px 14px", color: C.dim, whiteSpace: "nowrap" }}>{p.date}</td>
+                      <td style={{ padding: "11px 14px" }}><span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 6, background: p.type === "dca" ? "rgba(96,165,250,0.15)" : C.orangeSoft, color: p.type === "dca" ? C.blue : C.orange }}>{p.type === "dca" ? "DCA" : "Largo"}</span></td>
+                      <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}>{num(Math.round(b * SATS))} <span style={{ color: C.faint, fontSize: 11 }}>sats</span></td>
+                      <td style={{ padding: "11px 14px" }}>{usd(parseFloat(p.buyPrice) || 0)}</td>
+                      <td style={{ padding: "11px 14px", color: C.dim }}>{usd(cost)}</td>
+                      <td style={{ padding: "11px 14px" }}>{usd(value)}</td>
+                      <td style={{ padding: "11px 14px", color: pnl >= 0 ? C.green : C.red }}>{usd(pnl)}</td>
+                      <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}><button onClick={() => edit(p)} style={{ background: "none", border: "none", color: C.blue, cursor: "pointer", marginRight: 8 }}>editar</button><button onClick={() => del(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer" }}>✕</button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// COMPONENTES REUTILIZABLES
+// ════════════════════════════════════════════════════════════════
+const inp = { background: C.panel2, border: `1px solid ${C.line}`, color: C.text, borderRadius: 8, padding: "9px 11px", fontSize: 14, width: "100%", fontFamily: "'JetBrains Mono', monospace", outline: "none", boxSizing: "border-box" };
+
+function Toggle({ active, onClick, children }) {
+  return <button onClick={onClick} style={{ flex: 1, padding: "9px 0", borderRadius: 8, fontSize: 13, cursor: "pointer", fontFamily: "inherit", background: active ? C.orangeSoft : C.panel2, color: active ? C.orange : C.dim, border: `1px solid ${active ? C.orange : C.line}` }}>{children}</button>;
+}
+function Field({ label, children }) {
+  return <div><div style={{ fontSize: 11, color: C.dim, marginBottom: 5 }}>{label}</div>{children}</div>;
+}
+function Stat({ label, value, sub, accent }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "13px 15px" }}>
+      <div style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 0.6 }}>{label}</div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 19, fontWeight: 700, marginTop: 5, color: accent || C.text, wordBreak: "break-word" }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: accent || C.dim, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+function Slider({ label, value, min, max, step, suffix, onChange, accent }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: 12, color: C.dim }}>{label}</span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, fontWeight: 700, color: accent || C.text }}>{value}{suffix}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} style={{ width: "100%" }} />
+    </div>
+  );
+}
+function NumberField({ label, value, onChange, prefix }) {
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 6 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, padding: "0 10px" }}>
+        {prefix && <span style={{ color: C.faint, fontFamily: "'JetBrains Mono', monospace" }}>{prefix}</span>}
+        <input type="number" value={value} onChange={(e) => onChange(parseFloat(e.target.value) || 0)} style={{ ...inp, border: "none", background: "transparent", padding: "9px 6px" }} />
+      </div>
+    </div>
+  );
+}
+function CostOfLivingCard({ yearsCov, real, assume }) {
+  const projCost = assume.costOfLiving * Math.pow(1 + assume.inflation / 100, assume.horizon);
+  return (
+    <div style={{ background: `linear-gradient(135deg, ${C.panel}, ${C.panel2})`, border: `1px solid ${C.line}`, borderRadius: 12, padding: "16px 18px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 20, alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <div style={{ fontSize: 12, color: C.dim }}>Años de costo de vida que cubriría</div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, color: C.green }}>{isFinite(yearsCov) && yearsCov > 0 ? `${yearsCov.toFixed(1)} años` : "—"}</div>
+        </div>
+        <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.8, textAlign: "right" }}>
+          <div>Costo de vida hoy: <b style={{ color: C.text, fontFamily: "'JetBrains Mono', monospace" }}>{usd(assume.costOfLiving)}</b>/año</div>
+          <div>Proyectado en {assume.horizon}a (inflación): <b style={{ color: C.violet, fontFamily: "'JetBrains Mono', monospace" }}>{usd(projCost)}</b>/año</div>
+          <div>Poder adquisitivo (hoy): <b style={{ color: C.text, fontFamily: "'JetBrains Mono', monospace" }}>{short(real)}</b></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+function PriceTag({ livePrice, priceSource, fetchPrice, useManual, setUseManual, manualPrice, setManualPrice }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", minWidth: 200 }}>
+      <div style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1 }}>Precio BTC</div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 24, fontWeight: 700, color: C.orange }}>{livePrice ? usd(livePrice) : "…"}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+        <span style={{ fontSize: 10, color: C.faint }}>{priceSource}</span>
+        <button onClick={fetchPrice} style={{ marginLeft: "auto", background: "none", border: "none", color: C.blue, cursor: "pointer", fontSize: 11 }}>↻ actualizar</button>
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 11, color: C.dim, cursor: "pointer" }}>
+        <input type="checkbox" checked={useManual} onChange={(e) => setUseManual(e.target.checked)} />precio manual
+        {useManual && <input type="number" value={manualPrice} onChange={(e) => setManualPrice(e.target.value)} placeholder="0" style={{ ...inp, width: 90, padding: "3px 6px", fontSize: 12 }} />}
+      </label>
+    </div>
+  );
+}
+function PositionBar({ avg, price }) {
+  const diff = ((price - avg) / avg) * 100, inProfit = price >= avg;
+  const lo = Math.min(avg, price), hi = Math.max(avg, price), range = hi - lo || 1;
+  const min = lo - range * 0.4, max = hi + range * 0.4, span = max - min;
+  const posAvg = ((avg - min) / span) * 100, posPrice = ((price - min) / span) * 100;
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+        <span style={{ fontSize: 13, color: C.dim }}>Posición de tu DCA vs. mercado</span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, fontWeight: 700, color: inProfit ? C.green : C.red }}>{inProfit ? "En ganancia" : "Bajo el agua"} {pct(diff)}</span>
+      </div>
+      <div style={{ position: "relative", height: 8, background: C.panel2, borderRadius: 999, marginTop: 26, marginBottom: 26 }}>
+        <div style={{ position: "absolute", height: "100%", borderRadius: 999, left: `${Math.min(posAvg, posPrice)}%`, width: `${Math.abs(posPrice - posAvg)}%`, background: inProfit ? C.green : C.red, opacity: 0.4 }} />
+        <Marker pos={posAvg} color={C.blue} top label="Promedio" value={usd(avg)} />
+        <Marker pos={posPrice} color={C.orange} label="Actual" value={usd(price)} />
+      </div>
+    </div>
+  );
+}
+function Marker({ pos, color, label, value, top }) {
+  return (
+    <div style={{ position: "absolute", left: `${pos}%`, top: "50%", transform: "translate(-50%,-50%)" }}>
+      <div style={{ width: 14, height: 14, borderRadius: "50%", background: color, border: `3px solid ${C.bg}`, boxShadow: `0 0 0 1px ${color}` }} />
+      <div style={{ position: "absolute", left: "50%", transform: "translateX(-50%)", [top ? "bottom" : "top"]: 16, whiteSpace: "nowrap", textAlign: "center" }}>
+        <div style={{ fontSize: 10, color: C.faint }}>{label}</div>
+        <div style={{ fontSize: 12, color, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{value}</div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
