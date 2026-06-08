@@ -668,20 +668,6 @@ function Tracker({ purchases, setPurchases, livePrice, unit, setUnit }) {
 
   return (
     <div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 18 }}>
-        <Stat label="Total invertido" value={usd(all.cost)} />
-        <Stat label="Sats acumulados" value={num(all.sats)} sub={`${all.btc.toFixed(8)} BTC`} accent={C.orange} />
-        <Stat label="Precio promedio (DCA)" value={usd(all.avg)} accent={C.blue} />
-        <Stat label="Valor actual" value={usd(all.value)} />
-        <Stat label="P&L" value={usd(all.pnl)} sub={pct(all.pnlPct)} accent={all.pnl >= 0 ? C.green : C.red} />
-      </div>
-
-      {all.avg > 0 && livePrice > 0 && (
-        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "14px 16px", marginBottom: 18 }}>
-          <PositionBar avg={all.avg} price={livePrice} />
-        </div>
-      )}
-
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
         {[{ k: "all", l: `Todo (${all.n})` }, { k: "dca", l: `DCA (${dca.n})` }, { k: "hold", l: `Largo plazo (${hold.n})` }].map((t) => (
           <button key={t.k} onClick={() => setFilter(t.k)} style={{
@@ -691,6 +677,25 @@ function Tracker({ purchases, setPurchases, livePrice, unit, setUnit }) {
           }}>{t.l}</button>
         ))}
       </div>
+
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 10 }}>
+        Mostrando: <b style={{ color: C.orange }}>{filter === "dca" ? "solo compras DCA" : filter === "hold" ? "solo compras de Largo plazo" : "todas tus compras"}</b>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 18 }}>
+        <Stat label="Total invertido" value={usd(active.cost)} />
+        <Stat label="Sats acumulados" value={num(active.sats)} sub={`${active.btc.toFixed(8)} BTC`} accent={C.orange} />
+        <Stat label="Precio promedio" value={usd(active.avg)} accent={C.blue} />
+        <Stat label="Valor actual" value={usd(active.value)} />
+        <Stat label="P&L" value={usd(active.pnl)} sub={pct(active.pnlPct)} accent={active.pnl >= 0 ? C.green : C.red} />
+      </div>
+
+      {active.avg > 0 && livePrice > 0 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "14px 16px", marginBottom: 18 }}>
+          <PositionBar avg={active.avg} price={livePrice} />
+        </div>
+      )}
+
 
       {/* posición de cada compra */}
       {scatterData.length > 0 && (
@@ -924,7 +929,7 @@ function PositionBar({ avg, price }) {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-        <span style={{ fontSize: 13, color: C.dim }}>Posición de tu DCA vs. mercado</span>
+        <span style={{ fontSize: 13, color: C.dim }}>Posición de tu costo vs. mercado</span>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, fontWeight: 700, color: inProfit ? C.green : C.red }}>{inProfit ? "En ganancia" : "Bajo el agua"} {pct(diff)}</span>
       </div>
       <div style={{ position: "relative", height: 8, background: C.panel2, borderRadius: 999, marginTop: 26, marginBottom: 26 }}>
