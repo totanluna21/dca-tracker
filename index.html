@@ -1651,7 +1651,7 @@ function Tracker({
     setPending([]);
   };
   const toBTC = p => {
-    const a = parseFloat(p.amount) || 0;
+    const a = parseFloat(String(p.amount).replace(",", ".")) || 0;
     return p.unit === "sats" ? a / SATS : a;
   };
   const stats = list => {
@@ -2445,7 +2445,7 @@ function Mining({
   const [form, setForm] = useState(blank);
   const [editId, setEditId] = useState(null);
   const toBTC = m => {
-    const a = parseFloat(m.amount) || 0;
+    const a = parseFloat(String(m.amount).replace(",", ".")) || 0;
     return m.unit === "sats" ? a / SATS : a;
   };
   const sorted = useMemo(() => [...mining].sort((a, b) => a.date.localeCompare(b.date)), [mining]);
@@ -2483,7 +2483,12 @@ function Mining({
     });
   }, [sorted]);
   const submit = () => {
-    if (!form.amount) return;
+    const a = parseFloat(String(form.amount).replace(",", ".")) || 0;
+    const sats = Math.round((form.unit === "sats" ? a / SATS : a) * SATS);
+    if (sats < 1) {
+      alert("El monto da 0 sats. Si tu pool te da el pago en BTC (ej. 0.00021), cambia la unidad a BTC antes de añadir.");
+      return;
+    }
     if (editId) {
       setMining(p => p.map(x => x.id === editId ? {
         ...x,
@@ -2810,7 +2815,27 @@ function Mining({
       cursor: "pointer",
       fontFamily: "inherit"
     }
-  }, "✕")))), /*#__PURE__*/React.createElement("div", {
+  }, "✕"))), form.amount ? (() => {
+    const a = parseFloat(String(form.amount).replace(",", ".")) || 0;
+    const btc = form.unit === "sats" ? a / SATS : a;
+    const sats = Math.round(btc * SATS);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 12,
+        fontSize: 13,
+        color: C.dim,
+        fontFamily: "'JetBrains Mono', monospace"
+      }
+    }, "Vas a añadir: ", /*#__PURE__*/React.createElement("b", {
+      style: {
+        color: sats >= 1 ? C.orange : C.red
+      }
+    }, num(sats), " sats"), " · ", btc.toFixed(8), " BTC · ", usd(btc * livePrice), " hoy", sats < 1 ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.red
+      }
+    }, " — eso da 0 sats. Si tu pool te da BTC (ej. 0.00021), cambia la unidad a BTC.") : null);
+  })() : null), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
       border: `1px solid ${C.line}`,
