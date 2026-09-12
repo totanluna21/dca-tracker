@@ -2477,20 +2477,22 @@ function Mining({
     projValue = projTotal * livePrice;
   }
   const [rateMonth, setRateMonth] = useState("");
+  const [manualFuture, setManualFuture] = useState("");
   const H = assume.horizon;
   const effRate = rateMonth !== "" ? parseFloat(String(rateMonth).replace(",", ".")) || 0 : btcPerMonth;
   const monthsUntilEnd = ce ? Math.max(0, (ce - now) / (86400000 * 30.44)) : Infinity;
   const monthsMining = Math.min(H * 12, monthsUntilEnd);
   const futureMined = effRate * monthsMining;
   const mpBTC = totalBTC + futureMined;
-  const mpPrice = livePrice * Math.pow(1 + assume.cagr / 100, H);
+  const mpPrice = manualFuture !== "" ? parseFloat(String(manualFuture).replace(",", ".")) || 0 : livePrice * Math.pow(1 + assume.cagr / 100, H);
   const mpValue = mpBTC * mpPrice;
   const mpReal = mpValue / Math.pow(1 + assume.inflation / 100, H);
   const priceYears = [];
+  const impliedRate = manualFuture !== "" && livePrice > 0 && mpPrice > 0 ? Math.pow(mpPrice / livePrice, 1 / Math.max(1, H)) - 1 : assume.cagr / 100;
   for (let y = 0; y <= H; y++) {
     priceYears.push({
       year: y,
-      price: livePrice * Math.pow(1 + assume.cagr / 100, y)
+      price: livePrice * Math.pow(1 + impliedRate, y)
     });
   }
   const chart = useMemo(() => {
@@ -2605,16 +2607,30 @@ function Mining({
     setAssume: setAssume
   }), /*#__PURE__*/React.createElement("div", {
     style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
+      gap: 12,
       marginBottom: 14
     }
   }, /*#__PURE__*/React.createElement(Field, {
-    label: `Ritmo estimado de minería (BTC por mes) — automático: ${btcPerMonth.toFixed(6)}`
+    label: `Ritmo estimado de minería (BTC/mes) — auto: ${btcPerMonth.toFixed(6)}`
   }, /*#__PURE__*/React.createElement("input", {
     type: "number",
     value: rateMonth,
     onChange: e => setRateMonth(e.target.value),
     placeholder: btcPerMonth.toFixed(6),
     style: inp
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: `Precio BTC a ${H} años (manual — ej. 280000)`
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: manualFuture,
+    onChange: e => setManualFuture(e.target.value),
+    placeholder: `vacío = usar CAGR (auto: ${Math.round(livePrice * Math.pow(1 + assume.cagr / 100, H))})`,
+    style: {
+      ...inp,
+      borderColor: manualFuture !== "" ? C.orange : C.line
+    }
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -2626,7 +2642,7 @@ function Mining({
     label: `Precio BTC proyectado (${H}a)`,
     value: short(mpPrice),
     accent: C.orange,
-    sub: usd(mpPrice)
+    sub: usd(mpPrice) + (manualFuture !== "" ? " · manual" : "")
   }), /*#__PURE__*/React.createElement(Stat, {
     label: "BTC total proyectado",
     value: mpBTC.toFixed(6),
@@ -2636,7 +2652,7 @@ function Mining({
     label: `Valor proyectado (${H}a)`,
     value: short(mpValue),
     accent: C.green,
-    sub: usd(projValue)
+    sub: usd(mpValue)
   }), /*#__PURE__*/React.createElement(Stat, {
     label: "Valor real (hoy)",
     value: short(mpReal),
@@ -2715,7 +2731,7 @@ function Mining({
       marginTop: 8,
       lineHeight: 1.5
     }
-  }, "Proyecta cuánto BTC tendrías minando al ritmo estimado durante ", H, " años, valorado a un precio de BTC que crece ", assume.cagr, "%/año. Pon el horizonte en 3 años (o los que quieras) con el control de arriba. Es un escenario, no una predicción.")), /*#__PURE__*/React.createElement("div", {
+  }, "Proyecta cuánto BTC tendrías minando al ritmo estimado durante ", H, " años, valorado al precio de BTC proyectado (el CAGR, o el precio manual que pongas — ej. $280k). Pon el horizonte en 3 años (o los que quieras) con el control de arriba. Es un escenario, no una predicción.")), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
       border: `1px solid ${C.line}`,
