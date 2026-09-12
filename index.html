@@ -605,7 +605,9 @@ function App() {
     setMining,
     miningContract,
     setMiningContract,
-    livePrice
+    livePrice,
+    assume,
+    setAssume
   }), /*#__PURE__*/React.createElement("p", {
     style: {
       color: C.faint,
@@ -2435,7 +2437,9 @@ function Mining({
   setMining,
   miningContract,
   setMiningContract,
-  livePrice
+  livePrice,
+  assume,
+  setAssume
 }) {
   const blank = {
     date: new Date().toISOString().slice(0, 10),
@@ -2471,6 +2475,23 @@ function Mining({
     const rate = elapsed > 0 ? totalBTC / elapsed : btcPerDay;
     projTotal = totalBTC + rate * daysLeft;
     projValue = projTotal * livePrice;
+  }
+  const [rateMonth, setRateMonth] = useState("");
+  const H = assume.horizon;
+  const effRate = rateMonth !== "" ? parseFloat(String(rateMonth).replace(",", ".")) || 0 : btcPerMonth;
+  const monthsUntilEnd = ce ? Math.max(0, (ce - now) / (86400000 * 30.44)) : Infinity;
+  const monthsMining = Math.min(H * 12, monthsUntilEnd);
+  const futureMined = effRate * monthsMining;
+  const mpBTC = totalBTC + futureMined;
+  const mpPrice = livePrice * Math.pow(1 + assume.cagr / 100, H);
+  const mpValue = mpBTC * mpPrice;
+  const mpReal = mpValue / Math.pow(1 + assume.inflation / 100, H);
+  const priceYears = [];
+  for (let y = 0; y <= H; y++) {
+    priceYears.push({
+      year: y,
+      price: livePrice * Math.pow(1 + assume.cagr / 100, y)
+    });
   }
   const chart = useMemo(() => {
     let acc = 0;
@@ -2563,6 +2584,138 @@ function Mining({
     sub: "BTC / mes",
     accent: C.blue
   })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      border: `1px solid ${C.line}`,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      marginBottom: 14,
+      color: C.dim,
+      textTransform: "uppercase",
+      letterSpacing: 0.6
+    }
+  }, "Proyección de minería"), /*#__PURE__*/React.createElement(Assumptions, {
+    assume: assume,
+    setAssume: setAssume
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: `Ritmo estimado de minería (BTC por mes) — automático: ${btcPerMonth.toFixed(6)}`
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: rateMonth,
+    onChange: e => setRateMonth(e.target.value),
+    placeholder: btcPerMonth.toFixed(6),
+    style: inp
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
+      gap: 12,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Stat, {
+    label: `Precio BTC proyectado (${H}a)`,
+    value: short(mpPrice),
+    accent: C.orange,
+    sub: usd(mpPrice)
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "BTC total proyectado",
+    value: mpBTC.toFixed(6),
+    accent: C.blue,
+    sub: `${num(Math.round(mpBTC * SATS))} sats`
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: `Valor proyectado (${H}a)`,
+    value: short(mpValue),
+    accent: C.green,
+    sub: usd(projValue)
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Valor real (hoy)",
+    value: short(mpReal),
+    accent: C.violet,
+    sub: "ajustado por inflación"
+  })), priceYears.length > 1 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.dim,
+      padding: "0 2px 6px"
+    }
+  }, "Precio BTC proyectado por año"), /*#__PURE__*/React.createElement(ResponsiveContainer, {
+    width: "100%",
+    height: 230
+  }, /*#__PURE__*/React.createElement(ComposedChart, {
+    data: priceYears,
+    margin: {
+      top: 6,
+      right: 16,
+      left: 4,
+      bottom: 0
+    }
+  }, /*#__PURE__*/React.createElement("defs", null, /*#__PURE__*/React.createElement("linearGradient", {
+    id: "gMP",
+    x1: "0",
+    y1: "0",
+    x2: "0",
+    y2: "1"
+  }, /*#__PURE__*/React.createElement("stop", {
+    offset: "0%",
+    stopColor: C.orange,
+    stopOpacity: 0.35
+  }), /*#__PURE__*/React.createElement("stop", {
+    offset: "100%",
+    stopColor: C.orange,
+    stopOpacity: 0
+  }))), /*#__PURE__*/React.createElement(CartesianGrid, {
+    stroke: C.line,
+    vertical: false
+  }), /*#__PURE__*/React.createElement(XAxis, {
+    dataKey: "year",
+    stroke: C.faint,
+    tick: {
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace"
+    },
+    tickFormatter: v => `${v}a`
+  }), /*#__PURE__*/React.createElement(YAxis, {
+    stroke: C.faint,
+    tick: {
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace"
+    },
+    tickFormatter: short,
+    width: 56
+  }), /*#__PURE__*/React.createElement(Tooltip, {
+    contentStyle: {
+      background: C.panel2,
+      border: `1px solid ${C.line}`,
+      borderRadius: 8,
+      fontSize: 12
+    },
+    labelFormatter: v => `Año ${v}`,
+    formatter: v => [usd(v), "Precio BTC"]
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: "price",
+    name: "Precio BTC",
+    stroke: C.orange,
+    strokeWidth: 2.5,
+    fill: "url(#gMP)"
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.faint,
+      marginTop: 8,
+      lineHeight: 1.5
+    }
+  }, "Proyecta cuánto BTC tendrías minando al ritmo estimado durante ", H, " años, valorado a un precio de BTC que crece ", assume.cagr, "%/año. Pon el horizonte en 3 años (o los que quieras) con el control de arriba. Es un escenario, no una predicción.")), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
       border: `1px solid ${C.line}`,
