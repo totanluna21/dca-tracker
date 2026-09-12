@@ -98,7 +98,9 @@ const K = {
   prefs: "dca:prefs:v1",
   assume: "dca:assumptions:v2",
   plan: "dca:plan:v1",
-  big: "dca:bigbuys:v1"
+  big: "dca:bigbuys:v1",
+  mining: "dca:mining:v1",
+  miningContract: "dca:miningcontract:v1"
 };
 const usd = (n, max = 0) => isFinite(n) ? n.toLocaleString("en-US", {
   style: "currency",
@@ -161,6 +163,11 @@ function App() {
     freq: "monthly"
   });
   const [bigBuys, setBigBuys] = useState([]);
+  const [mining, setMining] = useState([]);
+  const [miningContract, setMiningContract] = useState({
+    start: "",
+    end: ""
+  });
   const [savedAt, setSavedAt] = useState(0);
   const [justSaved, setJustSaved] = useState(false);
   useEffect(() => {
@@ -194,6 +201,11 @@ function App() {
         ...p
       })));
       await load(K.big, setBigBuys);
+      await load(K.mining, setMining);
+      await load(K.miningContract, c => setMiningContract(s => ({
+        ...s,
+        ...c
+      })));
       setLoaded(true);
     })();
   }, []);
@@ -211,7 +223,9 @@ function App() {
       purchases,
       bigBuys,
       assume,
-      plan
+      plan,
+      mining,
+      miningContract
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], {
       type: "application/json"
@@ -261,6 +275,11 @@ function App() {
       ...s,
       ...d.plan
     }));
+    if (Array.isArray(d.mining)) setMining(d.mining);
+    if (d.miningContract) setMiningContract(s => ({
+      ...s,
+      ...d.miningContract
+    }));
     setSavedAt(Date.now());
   };
   const copyBackup = async () => {
@@ -271,7 +290,9 @@ function App() {
       purchases,
       bigBuys,
       assume,
-      plan
+      plan,
+      mining,
+      miningContract
     });
     try {
       await navigator.clipboard.writeText(text);
@@ -299,6 +320,8 @@ function App() {
   useEffect(() => save(K.assume, assume), [assume]);
   useEffect(() => save(K.plan, plan), [plan]);
   useEffect(() => save(K.big, bigBuys), [bigBuys]);
+  useEffect(() => save(K.mining, mining), [mining]);
+  useEffect(() => save(K.miningContract, miningContract), [miningContract]);
 
   // ── Precio en vivo (varias fuentes con respaldo) ───────────────
   const fetchPrice = useCallback(async () => {
@@ -357,6 +380,10 @@ function App() {
     k: "big",
     l: "Compras grandes",
     icon: "◆"
+  }, {
+    k: "mining",
+    l: "Minería",
+    icon: "⛏"
   }];
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -573,7 +600,13 @@ function App() {
     bigBuys,
     setBigBuys,
     livePrice
-  })), /*#__PURE__*/React.createElement("p", {
+  })), view === "mining" && /*#__PURE__*/React.createElement(Mining, {
+    mining,
+    setMining,
+    miningContract,
+    setMiningContract,
+    livePrice
+  }), /*#__PURE__*/React.createElement("p", {
     style: {
       color: C.faint,
       fontSize: 11,
@@ -2397,6 +2430,483 @@ function Tracker({
 }
 
 // ════════════════════════════════════════════════════════════════
+function Mining({
+  mining,
+  setMining,
+  miningContract,
+  setMiningContract,
+  livePrice
+}) {
+  const blank = {
+    date: new Date().toISOString().slice(0, 10),
+    amount: "",
+    unit: "sats"
+  };
+  const [form, setForm] = useState(blank);
+  const [editId, setEditId] = useState(null);
+  const toBTC = m => {
+    const a = parseFloat(m.amount) || 0;
+    return m.unit === "sats" ? a / SATS : a;
+  };
+  const sorted = useMemo(() => [...mining].sort((a, b) => a.date.localeCompare(b.date)), [mining]);
+  const totalBTC = useMemo(() => mining.reduce((s, m) => s + toBTC(m), 0), [mining]);
+  const totalSats = Math.round(totalBTC * SATS);
+  const value = totalBTC * livePrice;
+  const firstDate = sorted.length ? new Date(sorted[0].date) : null;
+  const now = new Date();
+  const daysSpan = firstDate ? Math.max(1, (now - firstDate) / 86400000) : 0;
+  const btcPerDay = daysSpan > 0 ? totalBTC / daysSpan : 0;
+  const btcPerMonth = btcPerDay * 30;
+  const cs = miningContract.start ? new Date(miningContract.start) : null;
+  const ce = miningContract.end ? new Date(miningContract.end) : null;
+  let progress = null,
+    daysLeft = null,
+    projTotal = null,
+    projValue = null;
+  if (cs && ce && ce > cs) {
+    const totalDays = (ce - cs) / 86400000;
+    const elapsed = Math.min(totalDays, Math.max(0, (now - cs) / 86400000));
+    progress = elapsed / totalDays * 100;
+    daysLeft = Math.max(0, Math.round((ce - now) / 86400000));
+    const rate = elapsed > 0 ? totalBTC / elapsed : btcPerDay;
+    projTotal = totalBTC + rate * daysLeft;
+    projValue = projTotal * livePrice;
+  }
+  const chart = useMemo(() => {
+    let acc = 0;
+    return sorted.map(m => {
+      acc += toBTC(m);
+      return {
+        date: m.date.slice(5),
+        btc: acc
+      };
+    });
+  }, [sorted]);
+  const submit = () => {
+    if (!form.amount) return;
+    if (editId) {
+      setMining(p => p.map(x => x.id === editId ? {
+        ...x,
+        ...form
+      } : x));
+      setEditId(null);
+    } else setMining(p => [...p, {
+      id: uid(),
+      ...form
+    }]);
+    setForm({
+      ...blank
+    });
+  };
+  const edit = m => {
+    setEditId(m.id);
+    setForm({
+      date: m.date,
+      amount: m.amount,
+      unit: m.unit
+    });
+  };
+  const del = id => {
+    setMining(p => p.filter(x => x.id !== id));
+    if (editId === id) {
+      setEditId(null);
+      setForm({
+        ...blank
+      });
+    }
+  };
+  const setC = (k, v) => setMiningContract(s => ({
+    ...s,
+    [k]: v
+  }));
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.orangeSoft,
+      border: `1px solid ${C.orange}33`,
+      borderRadius: 10,
+      padding: "11px 14px",
+      marginBottom: 18,
+      fontSize: 13,
+      color: C.dim
+    }
+  }, "⛏ Registra aquí lo que ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.text
+    }
+  }, "recolecta tu minera"), " con fechas. Es independiente de tus compras: mide cuánto BTC vas acumulando por minería y proyecta cuánto tendrás al final del contrato."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+      gap: 12,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(Stat, {
+    label: "BTC recolectado",
+    value: totalBTC.toFixed(8),
+    accent: C.orange,
+    sub: `${num(totalSats)} sats`
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Valor actual",
+    value: usd(value),
+    accent: C.green
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Recolecciones",
+    value: mining.length
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Ritmo aprox.",
+    value: btcPerMonth.toFixed(6),
+    sub: "BTC / mes",
+    accent: C.blue
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      border: `1px solid ${C.line}`,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      marginBottom: 12,
+      color: C.dim,
+      textTransform: "uppercase",
+      letterSpacing: 0.6
+    }
+  }, "Contrato de minería (opcional)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+      gap: 14,
+      alignItems: "end"
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Inicio del contrato"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: miningContract.start,
+    onChange: e => setC("start", e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Fin del contrato"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: miningContract.end,
+    onChange: e => setC("end", e.target.value),
+    style: inp
+  }))), progress !== null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 12,
+      color: C.dim,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Avance del contrato: ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.orange
+    }
+  }, progress.toFixed(1), "%")), /*#__PURE__*/React.createElement("span", null, daysLeft, " días restantes")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 8,
+      background: C.panel2,
+      borderRadius: 999,
+      overflow: "hidden"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: `${Math.min(100, progress)}%`,
+      height: "100%",
+      background: C.orange
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+      gap: 12,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement(Stat, {
+    label: "Proyección BTC al final",
+    value: projTotal.toFixed(8),
+    accent: C.orange,
+    sub: `${num(Math.round(projTotal * SATS))} sats`
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Valor proyectado (precio hoy)",
+    value: usd(projValue),
+    accent: C.violet
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.faint,
+      marginTop: 8
+    }
+  }, "Proyección basada en tu ritmo de recolección hasta hoy. Cambiará según la dificultad de la red y el precio."))), chart.length > 1 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      border: `1px solid ${C.line}`,
+      borderRadius: 12,
+      padding: "16px 12px 8px",
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: C.dim,
+      padding: "0 6px 8px",
+      fontWeight: 600
+    }
+  }, "BTC recolectado acumulado"), /*#__PURE__*/React.createElement(ResponsiveContainer, {
+    width: "100%",
+    height: 260
+  }, /*#__PURE__*/React.createElement(ComposedChart, {
+    data: chart,
+    margin: {
+      top: 6,
+      right: 16,
+      left: 4,
+      bottom: 0
+    }
+  }, /*#__PURE__*/React.createElement("defs", null, /*#__PURE__*/React.createElement("linearGradient", {
+    id: "gM",
+    x1: "0",
+    y1: "0",
+    x2: "0",
+    y2: "1"
+  }, /*#__PURE__*/React.createElement("stop", {
+    offset: "0%",
+    stopColor: C.orange,
+    stopOpacity: 0.4
+  }), /*#__PURE__*/React.createElement("stop", {
+    offset: "100%",
+    stopColor: C.orange,
+    stopOpacity: 0
+  }))), /*#__PURE__*/React.createElement(CartesianGrid, {
+    stroke: C.line,
+    vertical: false
+  }), /*#__PURE__*/React.createElement(XAxis, {
+    dataKey: "date",
+    stroke: C.faint,
+    tick: {
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace"
+    }
+  }), /*#__PURE__*/React.createElement(YAxis, {
+    stroke: C.faint,
+    tick: {
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace"
+    },
+    tickFormatter: v => v.toFixed(4),
+    width: 70
+  }), /*#__PURE__*/React.createElement(Tooltip, {
+    contentStyle: {
+      background: C.panel2,
+      border: `1px solid ${C.line}`,
+      borderRadius: 8,
+      fontSize: 12
+    },
+    formatter: v => [v.toFixed(8) + " BTC", "Acumulado"]
+  }), /*#__PURE__*/React.createElement(Area, {
+    type: "monotone",
+    dataKey: "btc",
+    name: "BTC",
+    stroke: C.orange,
+    strokeWidth: 2.5,
+    fill: "url(#gM)"
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      border: `1px solid ${editId ? C.orange : C.line}`,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      fontWeight: 600,
+      marginBottom: 12
+    }
+  }, editId ? "Editar recolección" : "Registrar recolección"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))",
+      gap: 10,
+      alignItems: "end"
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Fecha"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: form.date,
+    onChange: e => setForm({
+      ...form,
+      date: e.target.value
+    }),
+    style: inp
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: `Recolectado (${form.unit === "sats" ? "sats" : "BTC"})`
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: form.amount,
+    onChange: e => setForm({
+      ...form,
+      amount: e.target.value
+    }),
+    placeholder: form.unit === "sats" ? "50000" : "0.0005",
+    style: inp
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Unidad"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, ["sats", "btc"].map(u => /*#__PURE__*/React.createElement(Toggle, {
+    key: u,
+    active: form.unit === u,
+    onClick: () => setForm({
+      ...form,
+      unit: u
+    })
+  }, u.toUpperCase())))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    style: {
+      flex: 1,
+      background: C.orange,
+      color: "#000",
+      border: "none",
+      borderRadius: 8,
+      padding: "10px 0",
+      fontSize: 14,
+      fontWeight: 700,
+      cursor: "pointer",
+      fontFamily: "inherit"
+    }
+  }, editId ? "Guardar" : "+ Añadir"), editId && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setEditId(null);
+      setForm({
+        ...blank
+      });
+    },
+    style: {
+      background: C.panel2,
+      color: C.dim,
+      border: `1px solid ${C.line}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      cursor: "pointer",
+      fontFamily: "inherit"
+    }
+  }, "✕")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      border: `1px solid ${C.line}`,
+      borderRadius: 12,
+      overflow: "hidden"
+    }
+  }, sorted.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 40,
+      textAlign: "center",
+      color: C.faint,
+      fontSize: 14
+    }
+  }, "Aún no registras recolecciones de tu minera.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: "100%",
+      borderCollapse: "collapse",
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      color: C.dim,
+      textAlign: "left",
+      fontSize: 11,
+      textTransform: "uppercase",
+      letterSpacing: 0.5
+    }
+  }, ["Fecha", "Recolectado", "Valor hoy", ""].map(h => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      padding: "11px 14px",
+      borderBottom: `1px solid ${C.line}`,
+      fontWeight: 600,
+      whiteSpace: "nowrap"
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", {
+    style: {
+      fontFamily: "'JetBrains Mono', monospace"
+    }
+  }, [...sorted].reverse().map(m => {
+    const b = toBTC(m);
+    return /*#__PURE__*/React.createElement("tr", {
+      key: m.id,
+      style: {
+        borderBottom: `1px solid ${C.line}`
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: "11px 14px",
+        color: C.dim,
+        whiteSpace: "nowrap"
+      }
+    }, m.date), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: "11px 14px"
+      }
+    }, num(Math.round(b * SATS)), " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.faint,
+        fontSize: 11
+      }
+    }, "sats")), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: "11px 14px",
+        color: C.green
+      }
+    }, usd(b * livePrice)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: "11px 14px",
+        whiteSpace: "nowrap"
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => edit(m),
+      style: {
+        background: "none",
+        border: "none",
+        color: C.blue,
+        cursor: "pointer",
+        marginRight: 8
+      }
+    }, "editar"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => del(m.id),
+      style: {
+        background: "none",
+        border: "none",
+        color: C.red,
+        cursor: "pointer"
+      }
+    }, "✕")));
+  }))))));
+}
+
 // COMPONENTES REUTILIZABLES
 // ════════════════════════════════════════════════════════════════
 const inp = {
